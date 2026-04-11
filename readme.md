@@ -1,23 +1,6 @@
----
-title: README
-author: Jinzhuo Shen
-date: today
-date-format: long
-format: 
-  html: 
-    self-contained: true
-    df-print: tibble
-editor_options: 
-  chunk_output_type: console
-execute: 
-  warning: false
-  message: false
----
-
 # Collaboration project
 
-This project was created for the statistical consulting based on Role playing.\
-It contains the data cleaning script, the main analysis report, and the output files used to summarise the FITFR dataset.
+This project was created for a statistical consulting role-play project. It contains the data cleaning script, the main analysis report, and the output files used to summarise the FITFR dataset.
 
 ## Project aim
 

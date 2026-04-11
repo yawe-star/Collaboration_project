@@ -1,0 +1,372 @@
+---
+title: "Data analysis code"
+format: html
+editor: visual
+---
+
+\
+\
+\
+\
+###data quick summary
+
+```{r}
+library(dplyr)
+library(readr)
+library(tidyr)
+
+dat <- read_csv("data/fitfr_clean.csv", show_col_types = FALSE)
+
+dat <- dat %>%
+  mutate(
+    treatment = factor(treatment, levels = c("A", "B", "C")),
+    pr = factor(pr, levels = c("No", "Yes"))
+  )
+
+# 1. N
+tab_n <- dat %>%
+  group_by(treatment) %>%
+  summarise(value = as.character(n()), .groups = "drop") %>%
+  mutate(variable = "N")
+
+# 2. Age
+tab_age <- dat %>%
+  group_by(treatment) %>%
+  summarise(
+    value = sprintf("%.1f ± %.1f", mean(age, na.rm = TRUE), sd(age, na.rm = TRUE)),
+    .groups = "drop"
+  ) %>%
+  mutate(variable = "Age (mean ± SD)")
+
+# 3. Female
+tab_female <- dat %>%
+  group_by(treatment) %>%
+  summarise(
+    n_female = sum(sex == "Female", na.rm = TRUE),
+    n_total = n(),
+    value = sprintf("%d (%.0f%%)", n_female, 100 * n_female / n_total),
+    .groups = "drop"
+  ) %>%
+  select(treatment, value) %>%
+  mutate(variable = "Female n (%)")
+
+# 4. AF
+tab_af <- dat %>%
+  group_by(treatment) %>%
+  summarise(
+    value = sprintf("%.2f ± %.2f", mean(af, na.rm = TRUE), sd(af, na.rm = TRUE)),
+    .groups = "drop"
+  ) %>%
+  mutate(variable = "AF (mean ± SD)")
+
+# 5. PR yes
+tab_pr <- dat %>%
+  group_by(treatment) %>%
+  summarise(
+    n_yes = sum(pr == "Yes", na.rm = TRUE),
+    n_total = n(),
+    value = sprintf("%d (%.0f%%)", n_yes, 100 * n_yes / n_total),
+    .groups = "drop"
+  ) %>%
+  select(treatment, value) %>%
+  mutate(variable = "PR yes n (%)")
+
+summary_table <- bind_rows(tab_n, tab_age, tab_female, tab_af, tab_pr) %>%
+  select(variable, treatment, value) %>%
+  pivot_wider(names_from = treatment, values_from = value)
+
+print(summary_table)
+```
+
+Independently analysis the relationship:
+
+AF \~ treatment
+
+AF \~ age
+
+PR \~ treatment
+
+PR \~ age
+
+```{r}
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(scales)
+
+dat <- read_csv("data/fitfr_analysis.csv", show_col_types = FALSE) %>%
+  mutate(
+    treatment = factor(treatment, levels = c("A", "B", "C")),
+    sex = factor(sex),
+    pr = factor(pr, levels = c("No", "Yes"))
+  )
+
+
+treat_cols <- c(
+  "A" = "#D8A7A7",   
+  "B" = "#7FA6C9",   
+  "C" = "#B7D7B0"    
+)
+
+# 1. AF by treatment
+p1 <- ggplot(dat, aes(x = treatment, y = af, fill = treatment)) +
+  geom_boxplot(alpha = 0.85, width = 0.65, outlier.alpha = 0.7) +
+  scale_fill_manual(values = treat_cols) +
+  labs(
+    title = "AF by treatment group",
+    x = "Treatment",
+    y = "AF"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+print(p1)
+
+# 2. AF vs age
+p2 <- ggplot(dat, aes(x = age, y = af, color = treatment)) +
+  geom_point(size = 2.5, alpha = 0.8) +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 1) +
+  scale_color_manual(values = treat_cols) +
+  labs(
+    title = "Relationship between age and AF",
+    x = "Age",
+    y = "AF",
+    color = "Treatment"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+print(p2)
+
+# 3. PR by treatment
+pr_treat <- dat %>%
+  group_by(treatment) %>%
+  summarise(
+    pr_yes = mean(pr == "Yes"),
+    .groups = "drop"
+  )
+
+p3 <- ggplot(pr_treat, aes(x = treatment, y = pr_yes, fill = treatment)) +
+  geom_col(width = 0.65, alpha = 0.9) +
+  scale_fill_manual(values = treat_cols) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(
+    title = "Proportion of PR = Yes by treatment group",
+    x = "Treatment",
+    y = "PR = Yes (%)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+print(p3)
+
+# 4. PR vs age
+dat_agebin <- dat %>%
+  mutate(age_group = cut(
+    age,
+    breaks = c(20, 30, 40, 50),
+    right = FALSE,
+    include.lowest = TRUE
+  )) %>%
+  group_by(age_group) %>%
+  summarise(
+    pr_yes = mean(pr == "Yes"),
+    n = n(),
+    .groups = "drop"
+  )
+
+p4 <- ggplot(dat_agebin, aes(x = age_group, y = pr_yes)) +
+  geom_col(width = 0.65, fill = "#9FB7C9", alpha = 0.9) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(
+    title = "Proportion of PR = Yes across age groups",
+    x = "Age group",
+    y = "PR = Yes (%)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+print(p4)
+```
+
+```{r}
+library(dplyr)
+library(readr)
+
+dat <- read_csv("data/fitfr_analysis.csv", show_col_types = FALSE) %>%
+  mutate(
+    treatment = factor(treatment, levels = c("A", "B", "C")),
+    sex = factor(sex),
+    pr = factor(pr, levels = c("No", "Yes"))
+  )
+
+
+# 1. AF model: linear regression
+
+af_model <- lm(af ~ treatment + age + sex, data = dat)
+
+cat("===== AF model =====\n")
+summary(af_model)
+
+cat("\n===== AF model ANOVA =====\n")
+anova(af_model)
+
+# 2. PR model: logistic regression
+pr_model <- glm(pr ~ treatment + age + sex, data = dat, family = binomial)
+
+cat("\n===== PR model =====\n")
+summary(pr_model)
+
+cat("\n===== PR model odds ratios =====\n")
+exp(cbind(OR = coef(pr_model), confint(pr_model)))
+
+```
+
+\
+
+```{r}
+library(dplyr)
+library(readr)
+library(stringr)
+library(ggplot2)
+library(broom)
+
+dat <- read_csv("data/fitfr_analysis.csv", show_col_types = FALSE) %>%
+  mutate(
+    treatment = factor(treatment, levels = c("A", "B", "C")),
+    sex = factor(sex),
+    pr = factor(pr, levels = c("No", "Yes"))
+  )
+
+#find SNP colomn
+snp_cols <- names(dat)[str_detect(names(dat), "^rs")]
+
+
+# 1. AF screening
+af_results <- lapply(snp_cols, function(snp) {
+  tmp <- dat %>%
+    select(af, treatment, age, sex, all_of(snp)) %>%
+    filter(!is.na(.data[[snp]])) %>%
+    mutate(snp_var = factor(.data[[snp]]))
+
+  if (n_distinct(tmp$snp_var) < 2) return(NULL)
+  
+  fit <- lm(af ~ snp_var + treatment + age + sex, data = tmp)
+  a <- anova(fit)
+  
+  # get P_value
+  p <- a["snp_var", "Pr(>F)"]
+  
+  tibble(
+    SNP = snp,
+    n = nrow(tmp),
+    p_value = p
+  )
+})
+
+af_results <- bind_rows(af_results) %>%
+  mutate(
+    FDR = p.adjust(p_value, method = "BH")
+  ) %>%
+  arrange(p_value)
+
+print(af_results)
+
+# 2. PR screening
+pr_results <- lapply(snp_cols, function(snp) {
+  tmp <- dat %>%
+    select(pr, treatment, age, sex, all_of(snp)) %>%
+    filter(!is.na(.data[[snp]])) %>%
+    mutate(snp_var = factor(.data[[snp]]))
+  
+  if (n_distinct(tmp$snp_var) < 2) return(NULL)
+  
+  fit <- glm(pr ~ snp_var + treatment + age + sex,
+             data = tmp,
+             family = binomial)
+  
+  d <- drop1(fit, test = "Chisq")
+  p <- d["snp_var", "Pr(>Chi)"]
+  
+  tibble(
+    SNP = snp,
+    n = nrow(tmp),
+    p_value = p
+  )
+})
+
+pr_results <- bind_rows(pr_results) %>%
+  mutate(
+    FDR = p.adjust(p_value, method = "BH")
+  ) %>%
+  arrange(p_value)
+
+print(pr_results)
+
+# save
+write_csv(af_results, "output/af_snp_ranking.csv")
+write_csv(pr_results, "output/pr_snp_ranking.csv")
+
+# 3. get top 10
+af_top10 <- af_results %>% slice_head(n = 10)
+pr_top10 <- pr_results %>% slice_head(n = 10)
+
+print(af_top10)
+print(pr_top10)
+
+# 4. AF plot
+p_af <- af_top10 %>%
+  mutate(SNP = reorder(SNP, p_value)) %>%
+  ggplot(aes(x = SNP, y = -log10(p_value))) +
+  geom_col(fill = "#7FA6C9", alpha = 0.9) +
+  coord_flip() +
+  labs(
+    title = "Top candidate SNPs for AF",
+    x = "SNP",
+    y = "-log10(p-value)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+print(p_af)
+
+# 5. PR plot
+p_pr <- pr_top10 %>%
+  mutate(SNP = reorder(SNP, p_value)) %>%
+  ggplot(aes(x = SNP, y = -log10(p_value))) +
+  geom_col(fill = "#D9A679", alpha = 0.9) +
+  coord_flip() +
+  labs(
+    title = "Top candidate SNPs for PR",
+    x = "SNP",
+    y = "-log10(p-value)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+print(p_pr)
+
+# save
+ggsave("figs/af_top10_snp.png", p_af, width = 8, height = 5, dpi = 300)
+ggsave("figs/pr_top10_snp.png", p_pr, width = 8, height = 5, dpi = 300)
+```

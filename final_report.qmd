@@ -1,0 +1,416 @@
+---
+title: "FITFR Statistical Consulting Report"
+author: "Jinzhuo Shen"
+date: "16 May 2026"
+bibliography: references.bib
+csl: ieee.csl
+format:
+  pdf:
+    toc: true
+    number-sections: true
+    colorlinks: true
+    pdf-engine: xelatex
+    geometry: margin=1in
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r setup}
+library(readr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(broom)
+library(knitr)
+library(scales)
+
+theme_set(theme_minimal(base_size = 11))
+
+fmt_p <- function(p) {
+  ifelse(is.na(p), NA_character_, ifelse(p < 0.001, "<0.001", sprintf("%.3f", p)))
+}
+
+fmt_num <- function(x, digits = 2) sprintf(paste0("%.", digits, "f"), x)
+
+treat_cols <- c("A" = "#D8A7A7", "B" = "#7FA6C9", "C" = "#B7D7B0")
+
+clean_dat <- read_csv("data/fitfr_clean.csv", show_col_types = FALSE) |>
+  mutate(
+    treatment = factor(treatment, levels = c("A", "B", "C")),
+    sex = factor(sex, levels = c("Female", "Male")),
+    pr = factor(pr, levels = c("No", "Yes"))
+  )
+
+analysis_dat <- read_csv("data/fitfr_analysis.csv", show_col_types = FALSE) |>
+  mutate(
+    treatment = factor(treatment, levels = c("A", "B", "C")),
+    sex = factor(sex, levels = c("Female", "Male")),
+    pr = factor(pr, levels = c("No", "Yes"))
+  )
+
+baseline_table <- bind_rows(
+  clean_dat |>
+    count(treatment, name = "value") |>
+    mutate(variable = "N", value = as.character(value)),
+  clean_dat |>
+    group_by(treatment) |>
+    summarise(
+      value = sprintf("%d (%.0f%%)", sum(sex == "Female", na.rm = TRUE),
+                      100 * mean(sex == "Female", na.rm = TRUE)),
+      .groups = "drop"
+    ) |>
+    mutate(variable = "Female, n (%)"),
+  clean_dat |>
+    group_by(treatment) |>
+    summarise(value = sprintf("%.2f (%.2f)", mean(af, na.rm = TRUE), sd(af, na.rm = TRUE)),
+              .groups = "drop") |>
+    mutate(variable = "AF, mean (SD)"),
+  clean_dat |>
+    group_by(treatment) |>
+    summarise(value = sprintf("%.1f (%.1f)", mean(age, na.rm = TRUE), sd(age, na.rm = TRUE)),
+              .groups = "drop") |>
+    mutate(variable = "Age, mean (SD)"),
+  clean_dat |>
+    group_by(treatment) |>
+    summarise(
+      value = sprintf("%d (%.0f%%)", sum(pr == "Yes", na.rm = TRUE),
+                      100 * mean(pr == "Yes", na.rm = TRUE)),
+      .groups = "drop"
+    ) |>
+    mutate(variable = "PR yes, n (%)")
+) |>
+  select(variable, treatment, value) |>
+  pivot_wider(names_from = treatment, values_from = value)
+
+af_model <- lm(af ~ treatment + age + sex, data = analysis_dat)
+pr_model <- glm(pr ~ treatment + age + sex, data = analysis_dat, family = binomial())
+
+af_model_table <- tidy(af_model, conf.int = TRUE) |>
+  filter(term != "(Intercept)") |>
+  mutate(
+    term = recode(term,
+      treatmentB = "Treatment B vs A",
+      treatmentC = "Treatment C vs A",
+      age = "Age, per year",
+      sexMale = "Male vs female"
+    ),
+    Estimate = fmt_num(estimate, 2),
+    `95% CI` = sprintf("%s to %s", fmt_num(conf.low, 2), fmt_num(conf.high, 2)),
+    `p-value` = fmt_p(p.value)
+  ) |>
+  select(Variable = term, Estimate, `95% CI`, `p-value`)
+
+pr_coef <- coef(summary(pr_model))
+pr_model_table <- tibble(
+  term = rownames(pr_coef),
+  estimate = pr_coef[, "Estimate"],
+  std_error = pr_coef[, "Std. Error"],
+  p.value = pr_coef[, "Pr(>|z|)"]
+) |>
+  filter(term != "(Intercept)") |>
+  mutate(
+    term = recode(term,
+      treatmentB = "Treatment B vs A",
+      treatmentC = "Treatment C vs A",
+      age = "Age, per year",
+      sexMale = "Male vs female"
+    ),
+    OR = exp(estimate),
+    conf.low = exp(estimate - 1.96 * std_error),
+    conf.high = exp(estimate + 1.96 * std_error),
+    `Odds ratio` = fmt_num(OR, 2),
+    `95% CI` = sprintf("%s to %s", fmt_num(conf.low, 2), fmt_num(conf.high, 2)),
+    `p-value` = fmt_p(p.value)
+  ) |>
+  select(Variable = term, `Odds ratio`, `95% CI`, `p-value`)
+
+diplotype_to_dosage <- function(x) {
+  x <- as.character(x)
+  out <- rep(NA_real_, length(x))
+  ok <- !is.na(x) & nchar(x) == 2L
+  if (!any(ok)) return(out)
+  alleles <- sort(unique(unlist(strsplit(x[ok], "", fixed = TRUE), use.names = FALSE)))
+  alleles <- alleles[nzchar(alleles)]
+  if (length(alleles) < 2L) return(out)
+  alt <- alleles[2L]
+  sp <- strsplit(x, "", fixed = TRUE)
+  for (i in which(ok)) {
+    pair <- sp[[i]]
+    if (length(pair) == 2L) out[i] <- sum(pair == alt)
+  }
+  out
+}
+
+snp_cols <- grep("^rs", names(analysis_dat), value = TRUE)
+dosage_dat <- as.data.frame(lapply(analysis_dat[snp_cols], diplotype_to_dosage))
+is_mono <- vapply(dosage_dat, function(x) length(unique(na.omit(x))) < 2L, logical(1))
+use_snps <- setdiff(names(dosage_dat)[!is_mono], "rs123456")
+
+af_marginal <- bind_rows(lapply(use_snps, function(s) {
+  dd <- data.frame(af = analysis_dat$af, snp = dosage_dat[[s]]) |> tidyr::drop_na()
+  if (nrow(dd) < 10 || length(unique(dd$snp)) < 2) return(NULL)
+  tibble(SNP = s, p_value = anova(lm(af ~ snp, data = dd))$`Pr(>F)`[1])
+})) |>
+  mutate(FDR = p.adjust(p_value, method = "BH")) |>
+  arrange(p_value)
+
+pr_marginal <- bind_rows(lapply(use_snps, function(s) {
+  dd <- data.frame(pr = analysis_dat$pr, snp = dosage_dat[[s]]) |> tidyr::drop_na()
+  if (nrow(dd) < 10 || length(unique(dd$snp)) < 2) return(NULL)
+  tab <- table(dd$pr, dd$snp)
+  if (min(dim(tab)) < 2) return(NULL)
+  tibble(SNP = s, p_value = suppressWarnings(chisq.test(tab)$p.value))
+})) |>
+  mutate(FDR = p.adjust(p_value, method = "BH")) |>
+  arrange(p_value)
+
+af_partial <- bind_rows(lapply(snp_cols, function(s) {
+  dd <- analysis_dat |> select(af, treatment, age, sex, all_of(s)) |> tidyr::drop_na()
+  names(dd)[5] <- "snp"
+  dd$snp <- factor(dd$snp)
+  if (nrow(dd) < 10 || n_distinct(dd$snp) < 2) return(NULL)
+  fit <- lm(af ~ treatment + age + sex + snp, data = dd)
+  tibble(SNP = s, p_value = drop1(fit, test = "F")["snp", "Pr(>F)"])
+})) |>
+  mutate(FDR = p.adjust(p_value, method = "BH")) |>
+  arrange(p_value)
+
+pr_partial <- read_csv("output/pr_snp_ranking.csv", show_col_types = FALSE) |>
+  arrange(p_value)
+
+snp_summary_table <- tibble(
+  Outcome = c("AF", "PR", "AF", "PR"),
+  Check = c(
+    "Marginal dosage screen",
+    "Marginal dosage screen",
+    "Partial adjusted factor screen",
+    "Partial adjusted factor screen"
+  ),
+  `Smallest raw p-value` = c(min(af_marginal$p_value), min(pr_marginal$p_value),
+                             min(af_partial$p_value), min(pr_partial$p_value)),
+  `Smallest FDR` = c(min(af_marginal$FDR), min(pr_marginal$FDR),
+                     min(af_partial$FDR), min(pr_partial$FDR)),
+  `Number with FDR < 0.05` = c(sum(af_marginal$FDR < 0.05),
+                               sum(pr_marginal$FDR < 0.05),
+                               sum(af_partial$FDR < 0.05),
+                               sum(pr_partial$FDR < 0.05))
+) |>
+  mutate(
+    `Smallest raw p-value` = fmt_num(`Smallest raw p-value`, 4),
+    `Smallest FDR` = fmt_num(`Smallest FDR`, 3)
+  )
+
+af_cooks <- cooks.distance(af_model)
+diagnostic_summary <- tibble(
+  Item = c(
+    "AF model complete-case sample",
+    "AF model observations with Cook's distance > 4/n",
+    "PR model complete-case sample",
+    "PR fitted probability range"
+  ),
+  Value = c(
+    as.character(nobs(af_model)),
+    sprintf("%d; maximum Cook's distance %.3f", sum(af_cooks > 4 / nobs(af_model)), max(af_cooks)),
+    as.character(nobs(pr_model)),
+    sprintf("%.3f to %.3f", min(predict(pr_model, type = "response")),
+            max(predict(pr_model, type = "response")))
+  )
+)
+```
+
+# Abstract {.unnumbered}
+
+This report analyses the FITFR dataset supplied for a statistical consulting project. After cleaning, the dataset contained 100 subjects assigned to treatment groups A, B, and C, with AF as a continuous outcome and PR as a binary outcome. The primary question was whether treatment group was associated with AF and PR after adjusting for age and sex. AF was much lower in treatment group A than in groups B and C. In an adjusted linear regression, group B had an estimated AF value 35.72 units higher than group A and group C had an estimated AF value 34.34 units higher than group A, with both comparisons having p-values below 0.001. Age was also positively associated with AF. In contrast, the adjusted logistic regression for PR did not show clear treatment group differences; age was the main predictor, with an odds ratio of about 1.30 per additional year. SNP analyses were treated as exploratory because screening results were sensitive to model specification and no robust FDR-significant findings were retained in corrected checks.
+
+# Introduction
+
+## Dataset and context
+
+The FITFR dataset was provided as an Excel workbook, `raw-data/FITFR-final-data-v3.xlsx`, and was analysed within the reproducible project directory [@fitfr2026]. The cleaned dataset contains 100 subjects, with treatment group coded as A, B, or C. The variables used in the main analysis were treatment group, age, sex, AF, PR, smoker status, and a set of SNP genotype variables whose names begin with `rs`.
+
+AF is treated as a continuous outcome. PR is treated as a binary outcome with levels `No` and `Yes`. Smoking was recorded but all cleaned records were non-smokers, so smoker status could not be used as a model covariate. Two subjects had missing age after cleaning, giving 98 complete records for the adjusted models.
+
+## Research question
+
+The primary research question is: after accounting for age and sex, is treatment group associated with AF or PR in the FITFR data? A secondary, exploratory question is whether the available SNP variables show any reproducible signal worth further investigation. The treatment question is the main focus because treatment group is the central design variable in the dataset and because AF and PR are the main outcomes of interest.
+
+# Methods
+
+## Data cleaning and pre-processing
+
+The cleaning workflow was implemented in `R/01-import-clean.R`. The Excel file was read after skipping the first header row, variable names were standardised, and rows without an ID were removed. Age was converted to numeric and the sentinel value `-99` was recoded to missing. Sex, treatment, smoker status, and PR were standardised to consistent factor levels. AF was converted to numeric.
+
+SNP variables were identified by the `rs` prefix. Genotype strings were cleaned to valid two-letter allele pairs and standardised by sorting the two alleles alphabetically. Invalid genotype strings were set to missing. The cleaning script regenerated `data/fitfr_clean.csv`, `data/fitfr_clean.rds`, `data/fitfr_analysis.csv`, and `data/fitfr_analysis.rds`. The analysis-ready dataset excluded records missing treatment, age, sex, AF, or PR.
+
+## Descriptive analysis
+
+Baseline summaries were calculated by treatment group. Continuous variables were summarised by mean and standard deviation. Binary and categorical variables were summarised using counts and percentages. These summaries were used to check the treatment group sizes, identify imbalance in age or sex, and assess whether smoker status had enough variation to be modelled.
+
+## Model choice and implementation
+
+Because AF is continuous, the primary AF analysis used an adjusted linear regression, following standard regression modelling principles for continuous outcomes and covariate adjustment [@harrell2001regression]:
+
+$$
+\text{AF} = \beta_0 + \beta_1 I(\text{Treatment B}) + \beta_2 I(\text{Treatment C}) + \beta_3 \text{Age} + \beta_4 I(\text{Male}) + \epsilon.
+$$
+
+Treatment A and female sex were the reference categories. This model estimates mean AF differences between treatment groups after adjustment for age and sex.
+
+Because PR is binary, the primary PR analysis used an adjusted logistic regression [@hosmer2013applied]:
+
+$$
+\log \left\{ \frac{\Pr(\text{PR = Yes})}{1 - \Pr(\text{PR = Yes})} \right\}
+= \alpha_0 + \alpha_1 I(\text{Treatment B}) + \alpha_2 I(\text{Treatment C}) + \alpha_3 \text{Age} + \alpha_4 I(\text{Male}).
+$$
+
+Odds ratios were obtained by exponentiating logistic regression coefficients. Wald confidence intervals are reported for the logistic model.
+
+## Diagnostics and sensitivity checks
+
+For the AF model, residual behaviour and influence were checked using standard linear model diagnostics, including Cook's distance [@harrell2001regression]. For the PR model, fitted probabilities were inspected to check for numerical instability or near-separation [@hosmer2013applied]. The modelling strategy was kept simple because the dataset was small and the main aim was to estimate adjusted associations rather than build a predictive model.
+
+## SNP exploratory analysis
+
+SNP analyses were not treated as confirmatory. A preliminary SNP ranking used in the presentation was reviewed and found to be sensitive to the way SNP effects were coded and tested. Therefore, this report does not use the old AF SNP ranking figure as evidence of robust SNP discoveries. Instead, SNPs are summarised only as exploratory sensitivity checks. Two checks were considered: a marginal additive dosage screen and a partial adjusted factor screen. For each screen, p-values were adjusted across SNPs using the Benjamini-Hochberg false discovery rate (FDR) procedure [@benjamini1995controlling].
+
+## Software and reproducibility
+
+The analysis was conducted in R 4.5.1 [@R-base] and rendered using Quarto 1.7.33 [@quarto2026]. Data handling used `readr`, `dplyr`, and `tidyr` [@R-readr; @R-dplyr; @R-tidyr]; graphics used `ggplot2` and `scales` [@R-ggplot2; @R-scales]; model summaries used `broom` [@R-broom]; tables were rendered with `knitr` [@R-knitr]. The report can be regenerated from the project root with:
+
+```bash
+quarto render final_report.qmd
+```
+
+# Results
+
+## Baseline summary
+
+```{r tbl-baseline}
+kable(
+  baseline_table,
+  booktabs = TRUE,
+  caption = "Baseline summary for the cleaned FITFR dataset by treatment group (n = 100). Categorical variables are shown as counts with percentages, and AF and age are shown as mean (SD). The table highlights the lower AF values in treatment A and the modest age differences across groups."
+)
+```
+
+The treatment groups contained 32, 29, and 39 subjects in groups A, B, and C respectively. AF was markedly lower in group A than in groups B and C. Mean age varied across treatment groups, with group B slightly older on average than groups A and C. Sex was reasonably balanced across the three treatment groups. All subjects were coded as non-smokers after cleaning, so smoking could not contribute to adjusted models.
+
+These descriptive differences motivated covariate adjustment, but the adjusted models are the main basis for interpreting treatment associations.
+
+## AF results
+
+```{r fig-af-age}
+#| fig-cap: "AF by age and treatment group for the 98 complete cases used in adjusted modelling. Points are individual subjects and lines are separate unadjusted linear trends by treatment group. The main visual pattern is lower AF in treatment A and increasing AF with age."
+#| fig-width: 6.5
+#| fig-height: 4.2
+ggplot(analysis_dat, aes(x = age, y = af, color = treatment)) +
+  geom_point(size = 2.1, alpha = 0.75) +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 0.9) +
+  scale_color_manual(values = treat_cols) +
+  labs(x = "Age", y = "AF", color = "Treatment") +
+  theme(legend.position = "right")
+```
+
+```{r tbl-af-model}
+kable(
+  af_model_table,
+  booktabs = TRUE,
+  caption = sprintf("Adjusted linear regression for AF among 98 complete cases. The model included treatment group, age, and sex; treatment A and female sex were the reference categories. Coefficients estimate adjusted mean differences in AF, with large positive differences for treatments B and C relative to A. The adjusted R-squared was %.3f.", summary(af_model)$adj.r.squared)
+)
+```
+
+After adjustment for age and sex, treatment group remained strongly associated with AF. Compared with group A, the estimated mean AF was 35.72 units higher in group B and 34.34 units higher in group C. Both treatment contrasts had p-values below 0.001. Age was also positively associated with AF: each additional year of age was associated with an estimated 1.65-unit increase in AF, after adjustment. The sex coefficient was small relative to the treatment and age effects and was not clearly different from zero.
+
+## PR results
+
+```{r fig-pr-age}
+#| fig-cap: "Observed proportion of PR = Yes by age group among the 98 complete cases used in adjusted modelling. Bars show observed proportions and labels show age-group sample sizes. The main pattern is a higher observed PR = Yes proportion in older age groups."
+#| fig-width: 6
+#| fig-height: 3.8
+pr_age <- analysis_dat |>
+  mutate(
+    age_group = cut(age, breaks = c(20, 30, 40, 50), right = FALSE, include.lowest = TRUE),
+    age_group = recode(as.character(age_group),
+      "[20,30)" = "20-29",
+      "[30,40)" = "30-39",
+      "[40,50]" = "40-49"
+    )
+  ) |>
+  group_by(age_group) |>
+  summarise(pr_yes = mean(pr == "Yes"), n = n(), .groups = "drop")
+
+ggplot(pr_age, aes(x = age_group, y = pr_yes)) +
+  geom_col(width = 0.65, fill = "#9FB7C9", alpha = 0.9) +
+  geom_text(aes(label = paste0("n=", n)), vjust = -0.4, size = 3.2) +
+  scale_y_continuous(labels = percent_format(accuracy = 1), limits = c(0, 1.08)) +
+  labs(x = "Age group", y = "PR = Yes")
+```
+
+```{r tbl-pr-model}
+kable(
+  pr_model_table,
+  booktabs = TRUE,
+  caption = "Adjusted logistic regression for PR = Yes among 98 complete cases. The model included treatment group, age, and sex; treatment A and female sex were the reference categories. Odds ratios greater than 1 indicate higher odds of PR = Yes. Age is the main clear predictor, while treatment contrasts are not clearly different from 1."
+)
+```
+
+Treatment group was not clearly associated with PR after adjustment. The odds ratio for group B versus group A was 0.98, and the odds ratio for group C versus group A was 0.71; neither contrast had a small p-value. Age was the strongest predictor in this model. Each additional year of age was associated with about 1.30 times the odds of PR = Yes, with p-value below 0.001. The estimated odds ratio for males compared with females was 0.49, but this effect was not clearly significant in this sample.
+
+## SNP exploratory results
+
+```{r tbl-snp-summary}
+kable(
+  snp_summary_table,
+  booktabs = TRUE,
+  caption = "Exploratory SNP screening sensitivity summary for the analysis-ready FITFR data. The marginal dosage screen used additive 0/1/2 SNP coding, and the partial adjusted factor screen tested genotype-factor SNP terms after treatment, age, and sex. P-values were adjusted using the Benjamini-Hochberg FDR procedure; no screen retained SNPs with FDR < 0.05."
+)
+```
+
+The SNP results were sensitive to model specification and coding. In particular, the old AF SNP ranking figure from the presentation is not used here as evidence of a robust adjusted SNP finding. The sensitivity checks in this report did not retain any SNP with FDR below 0.05 for either AF or PR. The SNP component should therefore be viewed as hypothesis-generating only.
+
+# Discussion
+
+## Answer to the research question
+
+The main finding is that treatment group is strongly associated with AF after adjustment for age and sex. Subjects in treatment groups B and C had substantially higher adjusted AF values than subjects in treatment group A. The estimated differences were large, about 36 and 34 AF units respectively, and were precise in this dataset.
+
+The corresponding evidence for PR was different. Treatment group was not clearly associated with PR after adjustment. Instead, age was the dominant predictor of PR, with the fitted model estimating a 30% increase in the odds of PR = Yes for each additional year of age. Age was also positively associated with AF, so age adjustment was important for both outcomes.
+
+## Interpretation and implications
+
+The AF result suggests that treatment group captures an important difference in the continuous AF outcome. The PR result suggests that the observed crude variation in PR across treatment groups is largely explained by age rather than by treatment group itself. These conclusions should be described as associations. The current data do not justify causal language unless the study design and allocation mechanism independently support causal interpretation.
+
+The SNP analysis should not be placed in the main conclusion. It is useful as a screening exercise, but the findings were sensitive to whether SNPs were coded as genotype factors or additive dosages and to how the adjusted SNP term was tested. The defensible conclusion is that there is no robust FDR-significant SNP evidence in the current report.
+
+## Limitations and caveats
+
+The sample size was modest, with 100 cleaned records and 98 complete cases for the adjusted models. This limits the precision of subgroup analyses and makes SNP screening particularly unstable because many SNP variables are tested relative to the number of subjects. The AF model explained a very large proportion of outcome variation, but standard linear regression assumptions still matter; influential observations were checked but cannot be ruled out as a concern in such a small dataset. The logistic PR model assumes a linear age effect on the log-odds scale and may be sensitive to sparse outcome patterns in age or treatment subgroups.
+
+Smoking could not be evaluated because it had no variation after cleaning. Generalisability is also limited because the data come from a single project dataset with no external validation sample. Future work should use a larger dataset, pre-specify genetic analyses, and validate any SNP signal in an independent sample before making substantive claims.
+
+## Conclusion
+
+The FITFR data provide strong evidence that treatment group is associated with AF after adjustment for age and sex. They do not provide clear evidence that treatment group is independently associated with PR. Age is an important predictor, especially for PR. SNP results should be treated as exploratory and should not be reported as robust discoveries from the current analysis.
+
+# References {.unnumbered}
+
+::: {#refs}
+:::
+
+\phantomsection
+\addtocontents{toc}{\protect\contentsline{section}{Appendix: Reproducibility and diagnostics}{9}{appendix-reproducibility-and-diagnostics}}
+\section*{Appendix: Reproducibility and diagnostics}
+
+```{r tbl-diagnostics}
+kable(
+  diagnostic_summary,
+  booktabs = TRUE,
+  caption = "Reproducibility and diagnostic summary for the adjusted AF linear regression and adjusted PR logistic regression. Both models used the same 98 complete cases. Cook's distance summarises influence in the AF model, and the fitted probability range checks numerical behaviour in the PR model."
+)
+```
+
+For the AF model, 8 observations exceeded Cook's distance 4/n and the maximum Cook's distance was 0.107; for the PR model, fitted probabilities ranged from 0.052 to 0.969. These checks did not suggest numerical failure, but the modest sample size supports cautious interpretation of the adjusted estimates.
+
+The report uses the cleaned data files in `data/` and the clearly labelled temporary SNP sensitivity outputs in `output/`. It intentionally excludes the old presentation AF SNP ranking figure from the evidence base. The complete analysis code needed for the report is embedded in this Quarto file with code output hidden from the main text.
